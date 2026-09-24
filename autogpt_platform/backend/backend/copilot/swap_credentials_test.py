@@ -1,5 +1,6 @@
 """What the swap proxy is told: a value only for a host it is bound to."""
 
+import contextlib
 import importlib.util
 import re
 from pathlib import Path
@@ -20,8 +21,17 @@ _M = "backend.copilot.swap_credentials"
 _GITHUB_HOSTS = ["github.com", "api.github.com", "uploads.github.com"]
 
 
-def _token(value):
-    return patch(f"{_M}.get_provider_token", AsyncMock(return_value=value))
+@contextlib.contextmanager
+def _token(value, by_credential=None):
+    by_credential = by_credential or {}
+    with (
+        patch(f"{_M}.get_provider_token", AsyncMock(return_value=value)) as lookup,
+        patch(
+            f"{_M}.get_provider_tokens_by_credential",
+            AsyncMock(return_value=dict(by_credential)),
+        ),
+    ):
+        yield lookup
 
 
 @pytest.mark.asyncio
@@ -70,6 +80,25 @@ async def test_an_unknown_name_gets_nothing():
 async def test_a_user_who_has_not_connected_the_provider_gets_nothing():
     with _token(None):
         assert await resolve_swap_credential("user-1", "github", "github.com") is None
+
+
+@pytest.mark.asyncio
+async def test_each_stored_credential_is_an_entry_under_its_id():
+    """``hsurr:github:<id>`` is how a box names the account the chat picked."""
+    with _token("ghp_a", {"cred-a": "ghp_a", "cred-b": "ghp_b"}):
+        credential = await resolve_swap_credential("user-1", "github", "github.com")
+    assert credential is not None
+    assert credential.values == {
+        "access_token": "ghp_a",
+        "cred-a": "ghp_a",
+        "cred-b": "ghp_b",
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_unbound_host_does_not_list_the_users_credentials():
+    with _token("ghp_a", {"cred-a": "ghp_a"}):
+        assert await resolve_swap_credential("user-1", "github", "evil.test") is None
 
 
 def test_every_provider_says_where_its_token_may_go():
